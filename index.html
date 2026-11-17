@@ -3,309 +3,194 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
-<title>下樓梯</title>
+<title>疊疊高</title>
 <style>
-  html,body{margin:0;height:100%;background:#081417;overflow:hidden;touch-action:none;-webkit-user-select:none;user-select:none}
+  html,body{margin:0;height:100%;background:#0b0d12;overflow:hidden;touch-action:none;-webkit-user-select:none;user-select:none}
   body{display:flex;align-items:center;justify-content:center}
-  canvas{display:block;background:#0f2a2e;image-rendering:pixelated}
+  canvas{display:block}
 </style>
 </head>
 <body>
-<canvas id="c" width="360" height="540" aria-label="下樓梯遊戲"></canvas>
+<canvas id="c" width="360" height="540" aria-label="疊疊高遊戲，點擊或按空白鍵放下方塊"></canvas>
 <script>
 (() => {
-  const W = 360, H = 540, CEIL = 22, MAXHP = 10, PW = 80;
+  const W = 360, H = 540, BH = 22, BASE_W = 140, BASE_Y = H - 110, PERFECT = 5;
   const cv = document.getElementById('c'), g = cv.getContext('2d');
-  const FONT = '"Press Start 2P","Noto Sans TC","PingFang TC","Microsoft JhengHei",monospace';
+  const FONT = '"Noto Sans TC","PingFang TC","Microsoft JhengHei",system-ui,sans-serif';
 
   function fit() {
-    const s = Math.min(innerWidth / W, innerHeight / H);
-    cv.style.width = W * s + 'px';
-    cv.style.height = H * s + 'px';
+    const s = Math.min(innerWidth / W, innerHeight / H), r = devicePixelRatio || 1;
+    cv.style.width = W * s + 'px'; cv.style.height = H * s + 'px';
+    cv.width = W * s * r; cv.height = H * s * r;
+    g.setTransform(s * r, 0, 0, s * r, 0, 0);
   }
   addEventListener('resize', fit); fit();
 
-  // ---------- state ----------
-  let state = 'title', pl, plats, hp, dist, floor, speed, shake, tick = 0, overAt = 0;
-  let best = 0;
-  try { best = +localStorage.getItem('stairs-best') || 0; } catch (e) {}
+  // ---------- audio ----------
+  let ac;
+  function beep(freq, dur = .12, type = 'triangle', vol = .15) {
+    try {
+      ac = ac || new (window.AudioContext || window.webkitAudioContext)();
+      const o = ac.createOscillator(), v = ac.createGain();
+      o.type = type; o.frequency.value = freq;
+      v.gain.setValueAtTime(vol, ac.currentTime);
+      v.gain.exponentialRampToValueAtTime(.001, ac.currentTime + dur);
+      o.connect(v); v.connect(ac.destination);
+      o.start(); o.stop(ac.currentTime + dur);
+    } catch (e) {}
+  }
+  const SCALE = [0, 2, 4, 7, 9, 12, 14, 16, 19, 21, 24];
+  const note = i => 330 * Math.pow(2, SCALE[Math.min(i, SCALE.length - 1)] / 12);
 
-  const keys = {};
-  const touches = new Map();
-  let touchDir = 0;
+  // ---------- state ----------
+  let state = 'ready', tower, cur, debris, rings, streak, bestStreak, score, best = 0, cam, camT;
+  let shake = 0, msg = null, overAt = 0, newRecord = false, t = 0;
+  try { best = +localStorage.getItem('stack-best') || 0; } catch (e) {}
 
   function reset() {
-    pl = { x: W / 2 - 11, y: 120, w: 22, h: 26, vx: 0, vy: 0, on: null, inv: 0, face: 1 };
-    plats = [];
-    hp = MAXHP; dist = 0; floor = 0; speed = 1.1; shake = 0;
-    const first = mkPlat(W / 2 - PW / 2, 150, 'normal');
-    first.used = true;
-    plats.push(first);
-    pl.on = first; pl.y = first.y - pl.h;
-    let y = 150;
-    while (y < H + 70) { y += gap(); plats.push(mkPlat(rx(), y, pick())); }
+    tower = [{ x: (W - BASE_W) / 2, w: BASE_W }];
+    debris = []; rings = []; streak = 0; bestStreak = 0; score = 0; cam = 0; camT = 0;
+    shake = 0; msg = null; newRecord = false;
+    spawn(); state = 'play';
   }
-  const rx = () => 6 + Math.random() * (W - PW - 12);
-  const gap = () => 64 + Math.random() * 26;
-  function mkPlat(x, y, type) {
-    return { x, y, w: PW, h: 12, type, used: false, t: -1, dir: Math.random() < .5 ? -1 : 1, comp: 0 };
+  function spawn() {
+    const n = tower.length, top = tower[n - 1], fromLeft = n % 2 === 0;
+    cur = { x: fromLeft ? 0 : W - top.w, w: top.w, dir: fromLeft ? 1 : -1 };
   }
-  function pick() {
-    const d = Math.min(floor / 40, 1);
-    const table = [['normal', 46 - 14 * d], ['conveyor', 15], ['fragile', 14], ['spring', 10], ['spike', 15 + 12 * d]];
-    let sum = table.reduce((a, b) => a + b[1], 0), r = Math.random() * sum;
-    for (const [t, w] of table) { if ((r -= w) < 0) return t; }
-    return 'normal';
+  const speed = () => Math.min(2.2 + tower.length * 0.07, 6.5);
+  const wy = i => -i * BH;
+  const sy = w => BASE_Y + w + cam;
+  const hue = i => (200 + i * 7) % 360;
+
+  function drop() {
+    const n = tower.length, top = tower[n - 1];
+    const dx = cur.x - top.x;
+    if (Math.abs(dx) <= PERFECT) {
+      streak++; bestStreak = Math.max(bestStreak, streak);
+      let w = top.w, x = top.x;
+      if (streak >= 4 && w < BASE_W) { const nw = Math.min(w + 8, BASE_W); x -= (nw - w) / 2; w = nw; x = Math.max(0, Math.min(W - w, x)); }
+      tower.push({ x, w });
+      rings.push({ x, w, i: n, t: 0 });
+      beep(note(streak - 1), .18, 'triangle', .18);
+      if (streak >= 2) msg = { text: '完美 ×' + streak, t: 0 };
+      navigator.vibrate && navigator.vibrate(8);
+    } else {
+      const overlap = cur.w - Math.abs(dx);
+      if (overlap <= 0) { fail(); return; }
+      streak = 0;
+      if (dx > 0) {
+        debris.push({ x: cur.x + overlap, w: dx, wy: wy(n), vy: 0, vx: 1.2, i: n });
+        tower.push({ x: cur.x, w: overlap });
+      } else {
+        debris.push({ x: cur.x, w: -dx, wy: wy(n), vy: 0, vx: -1.2, i: n });
+        tower.push({ x: top.x, w: overlap });
+      }
+      beep(150, .1, 'square', .08);
+      shake = 3;
+    }
+    score = tower.length - 1;
+    camT = Math.max(0, (tower.length - 1) * BH - (BASE_Y - 250));
+    spawn();
   }
 
-  function hurt(n) {
-    if (pl.inv > 0) return;
-    hp -= n; pl.inv = 60; shake = 8;
-    if (hp <= 0) { hp = 0; die(); }
-  }
-  function die() {
-    state = 'over'; overAt = performance.now();
-    if (floor > best) {
-      best = floor;
-      try { localStorage.setItem('stairs-best', best); } catch (e) {}
-    }
+  function fail() {
+    debris.push({ x: cur.x, w: cur.w, wy: wy(tower.length), vy: 0, vx: 0, i: tower.length });
+    state = 'over'; overAt = performance.now(); shake = 10;
+    beep(110, .35, 'sawtooth', .12);
+    if (score > best) { newRecord = score > 0; best = score; try { localStorage.setItem('stack-best', best); } catch (e) {} }
   }
 
   // ---------- update ----------
-  function overlapX(p) { return pl.x + pl.w > p.x + 2 && pl.x < p.x + p.w - 2; }
-
   function update() {
-    tick++;
-    speed = Math.min(1.1 + floor * 0.014, 3);
-    dist += speed; floor = Math.floor(dist / 60);
-    if (pl.inv > 0) pl.inv--;
-    if (shake > 0) shake--;
-
-    // scroll platforms upward
-    for (const p of plats) {
-      p.y -= speed;
-      if (p.comp > 0) p.comp--;
-      if (p.t >= 0) { p.t--; if (p.t < 0) p.gone = true; }
+    t++;
+    if (state === 'play') {
+      cur.x += cur.dir * speed();
+      if (cur.x < 0) { cur.x = 0; cur.dir = 1; }
+      if (cur.x + cur.w > W) { cur.x = W - cur.w; cur.dir = -1; }
     }
-    plats = plats.filter(p => !p.gone && p.y > -20);
-    let last = plats.reduce((m, p) => Math.max(m, p.y), 0);
-    while (last < H + 70) { last += gap(); plats.push(mkPlat(rx(), last, pick())); }
-
-    // horizontal input
-    const dir = (keys.ArrowRight || keys.d || keys.D ? 1 : 0) - (keys.ArrowLeft || keys.a || keys.A ? 1 : 0) || touchDir;
-    pl.vx = dir * 3.4;
-    if (dir) pl.face = dir;
-    let belt = 0;
-
-    // standing / falling
-    let on = pl.on;
-    if (on && !on.gone && overlapX(on)) {
-      pl.y = on.y - pl.h; pl.vy = 0;
-      if (on.type === 'conveyor') belt = on.dir * 1.5;
-    } else {
-      on = null; pl.vy = Math.min(pl.vy + 0.45, 9);
-    }
-    pl.x = Math.max(0, Math.min(W - pl.w, pl.x + pl.vx + belt));
-
-    if (!on) {
-      const oldB = pl.y + pl.h;
-      pl.y += pl.vy;
-      if (pl.vy >= 0) {
-        for (const p of plats) {
-          if (overlapX(p) && oldB <= p.y + speed + 6 && pl.y + pl.h >= p.y) {
-            pl.y = p.y - pl.h; pl.vy = 0; on = p;
-            land(p);
-            break;
-          }
-        }
-      }
-    }
-    pl.on = on;
-
-    // ceiling
-    if (pl.y < CEIL) {
-      pl.y = CEIL; pl.vy = 2; pl.on = null;
-      hurt(5);
-    }
-    // pit
-    if (pl.y > H + 10) { hp = 0; shake = 12; die(); }
-  }
-
-  function land(p) {
-    if (p.type === 'spring') {
-      pl.vy = -11; p.comp = 10; pl.on = null; pl.y = p.y - pl.h - 1;
-      return;
-    }
-    if (p.type === 'spike') {
-      if (!p.used) hurt(4);
-    } else if (!p.used && hp < MAXHP) hp++;
-    if (p.type === 'fragile' && p.t < 0) p.t = 22;
-    p.used = true;
-    if (p.type === 'spring') pl.on = null;
+    cam += (camT - cam) * 0.1;
+    if (shake > 0) shake *= 0.85;
+    for (const d of debris) { d.vy += 0.6; d.wy += d.vy; d.x += d.vx; }
+    debris = debris.filter(d => sy(d.wy) < H + 60);
+    for (const r of rings) r.t++;
+    rings = rings.filter(r => r.t < 20);
+    if (msg && ++msg.t > 50) msg = null;
   }
 
   // ---------- draw ----------
-  function drawPlat(p) {
-    const x = Math.round(p.x), y = Math.round(p.y);
-    if (p.type === 'spike') {
-      g.fillStyle = '#6b7a80'; g.fillRect(x, y, p.w, p.h);
-      g.fillStyle = '#ff6b5a';
-      for (let i = 0; i < 5; i++) {
-        const sx = x + 4 + i * 15;
-        g.beginPath(); g.moveTo(sx, y); g.lineTo(sx + 7, y - 9); g.lineTo(sx + 14, y); g.fill();
-      }
-      return;
-    }
-    if (p.type === 'fragile') {
-      if (p.t >= 0 && (p.t >> 1) % 2) return;
-      g.fillStyle = '#b79ee0'; g.fillRect(x, y, p.w, p.h);
-      g.fillStyle = '#8a72b8';
-      g.fillRect(x + 18, y, 2, p.h); g.fillRect(x + 40, y + 3, 2, p.h - 3); g.fillRect(x + 60, y, 2, p.h);
-      return;
-    }
-    if (p.type === 'conveyor') {
-      g.fillStyle = '#4f7391'; g.fillRect(x, y, p.w, p.h);
-      g.fillStyle = '#9cc4e0';
-      const off = (tick * 0.6 * p.dir) % 16;
-      for (let i = -1; i < 6; i++) {
-        const cx = x + ((i * 16 + off + 160) % 96) - 8 + 8;
-        if (cx > x && cx < x + p.w - 6) {
-          g.beginPath();
-          if (p.dir > 0) { g.moveTo(cx, y + 2); g.lineTo(cx + 5, y + 6); g.lineTo(cx, y + 10); }
-          else { g.moveTo(cx + 5, y + 2); g.lineTo(cx, y + 6); g.lineTo(cx + 5, y + 10); }
-          g.fill();
-        }
-      }
-      return;
-    }
-    g.fillStyle = '#d9c8a0'; g.fillRect(x, y, p.w, p.h);
-    g.fillStyle = '#efe3c3'; g.fillRect(x, y, p.w, 3);
-    if (p.type === 'spring') {
-      const c = p.comp > 0 ? 4 : 12;
-      g.fillStyle = '#7bd88f'; g.fillRect(x + 20, y - c, 40, c);
-      g.fillStyle = '#3f9a55';
-      for (let i = 3; i < c; i += 4) g.fillRect(x + 20, y - i, 40, 1);
-    }
+  function blockColor(i, light) { return `hsl(${hue(i)} 70% ${light ? 72 : 58}%)`; }
+  function drawBlock(x, y, w, i) {
+    g.fillStyle = blockColor(i); g.fillRect(x, y, w, BH - 1);
+    g.fillStyle = blockColor(i, true); g.fillRect(x, y, w, 4);
   }
-
-  function drawPlayer() {
-    if (pl.inv > 0 && (pl.inv >> 2) % 2) return;
-    const x = Math.round(pl.x), y = Math.round(pl.y);
-    g.fillStyle = '#ffd166'; g.fillRect(x + 2, y + 6, 18, 14);        // body
-    g.fillStyle = '#ffe9a8'; g.fillRect(x + 4, y, 14, 10);             // head
-    g.fillStyle = '#0f2a2e';
-    g.fillRect(x + (pl.face > 0 ? 12 : 6), y + 3, 3, 3);                // eye
-    g.fillStyle = '#e07a5f';
-    const leg = (!pl.on || pl.vx === 0) ? 0 : ((tick >> 2) % 2) * 2;
-    g.fillRect(x + 4, y + 20, 5, 6 - leg); g.fillRect(x + 13, y + 20, 5, 4 + leg);
-    if (!pl.on) { g.fillStyle = '#ffd166'; g.fillRect(x - 2, y + 4, 3, 7); g.fillRect(x + 21, y + 4, 3, 7); } // arms up
-  }
-
-  function text(s, x, y, size, color, align = 'center') {
-    g.font = size + 'px ' + FONT; g.fillStyle = color; g.textAlign = align; g.textBaseline = 'middle';
+  function text(s, x, y, size, color, weight = 700, align = 'center') {
+    g.font = `${weight} ${size}px ${FONT}`; g.fillStyle = color; g.textAlign = align; g.textBaseline = 'middle';
     g.fillText(s, x, y);
   }
 
-  function drawScene() {
+  function render() {
     g.save();
-    if (shake > 0) g.translate((Math.random() - .5) * shake, (Math.random() - .5) * shake);
-    // background: wall lines drifting upward
-    g.fillStyle = '#0f2a2e'; g.fillRect(-10, -10, W + 20, H + 20);
-    g.fillStyle = '#143a3f';
-    const off = (dist * 0.5) % 54;
-    for (let y = -54 + (54 - off); y < H; y += 54) g.fillRect(0, y, W, 2);
-    g.fillRect(0, 0, 4, H); g.fillRect(W - 4, 0, 4, H);
+    if (shake > .5) g.translate((Math.random() - .5) * shake, (Math.random() - .5) * shake);
+    const h = hue(Math.max(score, 0));
+    const grad = g.createLinearGradient(0, 0, 0, H);
+    grad.addColorStop(0, `hsl(${h} 45% 22%)`); grad.addColorStop(1, `hsl(${(h + 40) % 360} 50% 8%)`);
+    g.fillStyle = grad; g.fillRect(-20, -20, W + 40, H + 40);
 
-    for (const p of plats) drawPlat(p);
-    drawPlayer();
-
-    // ceiling spikes
-    g.fillStyle = '#ff9f43';
-    for (let x = 0; x < W; x += 18) {
-      g.beginPath(); g.moveTo(x, 0); g.lineTo(x + 9, CEIL); g.lineTo(x + 18, 0); g.fill();
+    if (tower) {
+      tower.forEach((b, i) => { const y = sy(wy(i)); if (y > -BH && y < H + BH) drawBlock(b.x, y, b.w, i); });
+      if (state === 'play') drawBlock(cur.x, sy(wy(tower.length)), cur.w, tower.length);
+      for (const d of debris) { g.globalAlpha = .85; drawBlock(d.x, sy(d.wy), d.w, d.i); g.globalAlpha = 1; }
+      for (const r of rings) {
+        const k = r.t / 20, grow = k * 14;
+        g.strokeStyle = `rgba(255,255,255,${1 - k})`; g.lineWidth = 2;
+        g.strokeRect(r.x - grow, sy(wy(r.i)) - grow / 2, r.w + grow * 2, BH - 1 + grow);
+      }
     }
     g.restore();
 
-    // HUD
-    for (let i = 0; i < MAXHP; i++) {
-      g.fillStyle = i < hp ? (hp <= 3 ? '#ff6b5a' : '#7bd88f') : '#1d4a50';
-      g.fillRect(10 + i * 14, CEIL + 8, 11, 10);
+    if (state === 'play' || state === 'over') {
+      text(String(score), W / 2, 70, 56, '#fff', 800);
+      if (best > 0) text('最高 ' + best, W / 2, 112, 14, 'rgba(255,255,255,.6)', 500);
+      if (msg) {
+        const a = 1 - msg.t / 50;
+        text(msg.text, W / 2, 150 - msg.t * .3, 22, `rgba(255,236,150,${a})`, 800);
+      }
     }
-    text('地下 ' + floor + ' 層', W - 10, CEIL + 14, 12, '#efe3c3', 'right');
-  }
-
-  function overlay(lines) {
-    g.fillStyle = 'rgba(8,20,23,.82)'; g.fillRect(0, 0, W, H);
-    lines.forEach(l => text(...l));
-  }
-
-  function render() {
-    if (state === 'title') {
-      if (!pl) reset();
-      drawScene();
-      overlay([
-        ['下樓梯', W / 2, 190, 34, '#ffd166'],
-        ['一路往下，別碰天花板', W / 2, 245, 13, '#efe3c3'],
-        ['← → 或 A D 移動', W / 2, 300, 11, '#9cc4e0'],
-        ['手機：按住畫面左／右半邊', W / 2, 322, 11, '#9cc4e0'],
-        ['紫色會碎、紅刺扣血、綠色彈簧', W / 2, 356, 10, '#b79ee0'],
-        ['按空白鍵或點一下開始', W / 2, 420, 13, '#7bd88f'],
-        ['最高紀錄 地下 ' + best + ' 層', W / 2, 470, 10, '#6b7a80'],
-      ]);
-    } else if (state === 'play') {
-      drawScene();
-    } else {
-      drawScene();
-      overlay([
-        ['遊戲結束', W / 2, 190, 28, '#ff6b5a'],
-        ['你到了地下 ' + floor + ' 層', W / 2, 250, 16, '#efe3c3'],
-        [floor >= best && floor > 0 ? '新紀錄！' : '最高紀錄 ' + best + ' 層', W / 2, 285, 12, '#ffd166'],
-        ['按空白鍵或點一下再玩', W / 2, 360, 13, '#7bd88f'],
-      ]);
+    if (state === 'ready') {
+      text('疊疊高', W / 2, 190, 44, '#fff', 800);
+      text('方塊來回移動，在對齊時點一下', W / 2, 245, 14, 'rgba(255,255,255,.8)', 500);
+      text('切掉的部分會掉落，越疊越窄', W / 2, 268, 14, 'rgba(255,255,255,.8)', 500);
+      text('連續對齊三次以上，方塊會慢慢變寬', W / 2, 291, 14, 'rgba(255,255,255,.8)', 500);
+      text('點擊或按空白鍵開始', W / 2, 360, 16, '#ffec96', 700);
+      if (best) text('最高紀錄 ' + best + ' 層', W / 2, 400, 13, 'rgba(255,255,255,.6)', 500);
+    }
+    if (state === 'over') {
+      g.fillStyle = 'rgba(0,0,0,.45)'; g.fillRect(0, 160, W, 190);
+      text(newRecord ? '新紀錄！' : '倒了', W / 2, 195, 26, newRecord ? '#ffec96' : '#fff', 800);
+      let sub = `最長完美連擊 ${bestStreak}`;
+      if (!newRecord && best - score > 0 && best - score <= 5) sub = `只差 ${best - score + 1} 層就破紀錄`;
+      text(sub, W / 2, 235, 15, 'rgba(255,255,255,.85)', 500);
+      text('再來一次', W / 2, 300, 18, '#ffec96', 700);
     }
   }
 
   // ---------- input ----------
-  function start() {
-    if (state === 'over' && performance.now() - overAt < 500) return;
-    if (state === 'play') return;
-    reset(); state = 'play';
+  function press() {
+    if (state === 'ready') { reset(); return; }
+    if (state === 'play') { drop(); return; }
+    if (state === 'over' && performance.now() - overAt > 350) reset();
   }
   addEventListener('keydown', e => {
-    keys[e.key] = true;
-    if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', ' '].includes(e.key)) e.preventDefault();
-    if (e.key === ' ' || e.key === 'Enter') start();
+    if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); if (!e.repeat) press(); }
   });
-  addEventListener('keyup', e => { keys[e.key] = false; });
-  addEventListener('blur', () => { for (const k in keys) keys[k] = false; touches.clear(); touchDir = 0; });
-
-  function setTouch() {
-    let d = 0;
-    for (const v of touches.values()) d += v;
-    touchDir = Math.max(-1, Math.min(1, d));
-  }
-  cv.addEventListener('pointerdown', e => {
-    e.preventDefault();
-    const r = cv.getBoundingClientRect();
-    touches.set(e.pointerId, (e.clientX - r.left) < r.width / 2 ? -1 : 1);
-    setTouch(); start();
-  });
-  const up = e => { touches.delete(e.pointerId); setTouch(); };
-  cv.addEventListener('pointerup', up);
-  cv.addEventListener('pointercancel', up);
-  cv.addEventListener('pointermove', e => {
-    if (!touches.has(e.pointerId)) return;
-    const r = cv.getBoundingClientRect();
-    touches.set(e.pointerId, (e.clientX - r.left) < r.width / 2 ? -1 : 1);
-    setTouch();
-  });
+  cv.addEventListener('pointerdown', e => { e.preventDefault(); press(); });
   cv.addEventListener('contextmenu', e => e.preventDefault());
 
   // ---------- loop (fixed 60 Hz) ----------
   let prev = performance.now(), acc = 0;
   function frame(now) {
     acc += Math.min(now - prev, 100); prev = now;
-    while (acc >= 1000 / 60) { if (state === 'play') update(); else tick++; acc -= 1000 / 60; }
+    while (acc >= 1000 / 60) { update(); acc -= 1000 / 60; }
     render();
     requestAnimationFrame(frame);
   }
