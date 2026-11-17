@@ -43,7 +43,8 @@
   const note = i => 330 * Math.pow(2, SCALE[Math.min(i, SCALE.length - 1)] / 12);
 
   // ---------- state ----------
-  let state = 'ready', tower, cur, debris, rings, streak, bestStreak, score, best = 0, cam, camT;
+  let state = 'ready', tower, cur, debris, rings, streak, bestStreak, score = 0, best = 0, cam = 0, camT = 0;
+  debris = []; rings = []; streak = 0; bestStreak = 0;
   let shake = 0, msg = null, overAt = 0, newRecord = false, t = 0;
   try { best = +localStorage.getItem('stack-best') || 0; } catch (e) {}
 
